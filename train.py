@@ -51,7 +51,7 @@ for epoch in range(config.num_epoch):
         optimizer.zero_grad()
         cw, cc, qw, qc, y1s, y2s, ids = next(train_iter)
         cw, cc, qw, qc, y1s, y2s = cw.to(device), cc.to(device), qw.to(device), qc.to(device), y1s.to(device), y2s.to(device)
-        p1, p2 = model(cw, cc)
+        p1, p2 = model(cw, qw)
         loss_1 = F.nll_loss(p1, y1s)
         loss_2 = F.nll_loss(p2, y2s)
         loss = (loss_1 + loss_2) / 2
