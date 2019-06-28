@@ -5,11 +5,13 @@ from torch.nn.utils.rnn import pad_packed_sequence
 from torch.nn.utils.rnn import pack_padded_sequence
 
 d_embed = 300
+d_embed_char = 64
 d_model = 128
 p_dropout = 0.2
 
 def mask_logits(x, x_mask):
-    return x * x_mask.to(torch.float) + x * (1 - x_mask).to(torch.float) * (-1e30)
+    x_mask = x_mask.to(torch.float32)
+    return x * x_mask + (1 - x_mask) * (-1e30)
 
 class HighwayNet(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
@@ -27,7 +29,7 @@ class HighwayNet(nn.Module):
 class Embedding(nn.Module):
     def __init__(self):
         super(Embedding, self).__init__()
-        self.h = nn.Linear(d_embed, d_model, bias=False)
+        self.h = nn.Linear(d_embed + d_embed_char, d_model, bias=False)
         self.highway = nn.ModuleList([HighwayNet(d_model, d_model) for _ in range(2)])
 
     def forward(self, x):
@@ -87,25 +89,23 @@ class BiDAF(nn.Module):
     def __init__(self, word_embed):
         super(BiDAF, self).__init__()
         self.word_embedding = nn.Embedding.from_pretrained(word_embed)
+        self.word_embedding.weight[1].requires_grad = True
+        self.char_embedding = nn.Embedding(96, d_embed_char, padding_idx=0)
         self.embed = Embedding()
         self.encoder = LSTMEncoder(d_model, d_model, 1)
         self.attention = BiAttention()
         self.model = LSTMEncoder(d_model * 8, d_model, 2)
         self.out = LSTMEncoder(d_model * 2, d_model ,2)
-        # self.start = nn.Linear(10 * d_model, 1)
-        # self.end = nn.Linear(10 * d_model, 1)
-        self.atten1 = nn.Linear(d_model * 8, 1)
-        self.atten2 = nn.Linear(d_model * 8, 1)
-        self.mod1 = nn.Linear(d_model * 2, 1)
-        self.mod2 = nn.Linear(d_model * 2, 1)
-        for weight in (self.atten1.weight, self.atten2.weight, self.mod1.weight, self.mod2.weight):
-            nn.init.xavier_uniform_(weight)
+        self.start = nn.Linear(10 * d_model, 1)
+        self.end = nn.Linear(10 * d_model, 1)
 
-    def forward(self, cw, qw):
+    def forward(self, cw, cc, qw, qc):
         cw_mask, qw_mask = torch.zeros_like(cw) != cw, torch.zeros_like(qw) != qw
         c_len, q_len = torch.sum(cw_mask, dim=-1), torch.sum(qw_mask, dim=-1)
 
-        C, Q = self.word_embedding(cw), self.word_embedding(qw)
+        Cw, Qw = self.word_embedding(cw), self.word_embedding(qw)
+        Cc, Qc = self.char_embedding(cc), self.char_embedding(qc)
+        C, Q = torch.cat((Cw, torch.max(Cc, dim=-2)[0]), dim=-1), torch.cat((Qw, torch.max(Qc, dim=-2)[0]), dim=-1)
         C, Q = self.embed(C), self.embed(Q)
 
         C, Q = self.encoder(C, c_len), self.encoder(Q, q_len) # B * seq * 2d_model
@@ -113,13 +113,10 @@ class BiDAF(nn.Module):
         M = self.model(G, c_len) # B * seq * 2d_model
         M_proj = self.out(M, c_len) # B * seq * 2d_model
 
-        # p1 = self.start(torch.cat((G, M), dim=-1)).squeeze()
-        # p2 = self.start(torch.cat((G, M_proj), dim=-1)).squeeze()
-        p1 = (self.atten1(G) + self.mod1(M)).squeeze()
-        p2 = (self.atten1(G) + self.mod2(M_proj)).squeeze()
+        p1 = self.start(torch.cat((G, M), dim=-1)).squeeze()
+        p2 = self.start(torch.cat((G, M_proj), dim=-1)).squeeze()
 
-        p1 = F.log_softmax(mask_logits(p1, cw_mask), dim=-1)
-        p2 = F.log_softmax(mask_logits(p2, cw_mask), dim=-1)
+        p1, p2 = F.log_softmax(mask_logits(p1, cw_mask), dim=-1), F.log_softmax(mask_logits(p2, cw_mask), dim=-1)
 
         return p1, p2
 

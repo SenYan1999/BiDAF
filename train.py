@@ -7,7 +7,8 @@ import pickle
 import config
 from model import BiDAF
 # from standardmodel import QANet
-from utils import SQuADData
+from utils import *
+import utils
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from utils import valid
@@ -31,6 +32,7 @@ dev_dataset = SQuADData('pre_data/input/dev')
 # define model
 print('define model')
 model = BiDAF(pre_trained)
+# model = BiDAF(pre_trained, 128)
 # model = torch.load('model/model.pt')
 model = model.to(device)
 lr = config.learning_rate
@@ -42,27 +44,41 @@ optimizer = torch.optim.Adam(lr=config.learning_rate, betas=(config.beta1, confi
 scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda ee: cr * log2(ee + 1) if ee < warm_up else lr)
 
 print('begin train')
+f = open('log/log.txt', 'w')
 for epoch in range(config.num_epoch):
     train_dataloader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    train_iter = iter(train_dataloader)
+    # train_iter = iter(train_dataloader)
     losses = []
+    f1s = []
+    ems = []
     model.train()
-    for step in tqdm(range(len(train_dataset) // config.batch_size)):
+    # for step in tqdm(range(len(train_dataset) // config.batch_size)):
+    with tqdm(total=len(train_dataset)) as process_bar:
         optimizer.zero_grad()
-        cw, cc, qw, qc, y1s, y2s, ids = next(train_iter)
-        cw, cc, qw, qc, y1s, y2s = cw.to(device), cc.to(device), qw.to(device), qc.to(device), y1s.to(device), y2s.to(device)
-        p1, p2 = model(cw, qw)
-        loss_1 = F.nll_loss(p1, y1s)
-        loss_2 = F.nll_loss(p2, y2s)
-        loss = (loss_1 + loss_2) / 2
-        losses.append(loss.item())
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        if(step % 100 == 0):
-            print('Epoch: %2d | Step: %3d | Loss: %3f' % (epoch, step, loss))
+        # cw, cc, qw, qc, y1s, y2s, ids = next(train_iter)
+        for cw, cc, qw, qc, y1s, y2s, ids in train_dataloader:
+            cw, cc, qw, qc, y1s, y2s = cw.to(device), cc.to(device), qw.to(device), qc.to(device), y1s.to(device), y2s.to(device)
+            p1, p2 = model(cw, cc, qw, qc)
+            loss_1 = F.nll_loss(p1, y1s)
+            loss_2 = F.nll_loss(p2, y2s)
+            loss = (loss_1 + loss_2) / 2
+            losses.append(loss.item())
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            f1s.append(f1_score(p1, p2, y1s, y2s))
+            ems.append(utils.em(p1, p2, y1s, y2s))
+            process_bar.update(config.batch_size)
+            process_bar.set_postfix(NLL=loss.item())
+
+        # if(step % 100 == 0):
+        #     print('Epoch: %2d | Step: %3d | Loss: %3f' % (epoch, step, loss))
+
+    print('Epoch: %2d | F1: %.2f | EM: %.2f | LOSS: %.2f' % (epoch, np.mean(f1s), np.mean(ems), loss.item()))
     torch.save(model, 'model/model.pt')
     f1, em, loss = valid(model, dev_dataset)
     print('-' * 30)
     print('Valid:')
-    print('F1: %.2f | EM: %.2f | LOSS: %.2f' % (f1, em, loss))
+    message = 'Epoch: %2d | F1: %.2f | EM: %.2f | LOSS: %.2f' % (epoch, f1, em, loss)
+    print(message)
+    f.write(message + '\n')
